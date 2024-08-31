@@ -1,10 +1,12 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 
 	"com.developerscoffee/dynamic-load-balancer/common"
 	STRATEGY "com.developerscoffee/dynamic-load-balancer/strategy"
@@ -15,7 +17,9 @@ type LB struct {
 	strategy STRATEGY.BalancingStrategy
 }
 
-func InitLB() *LB {
+func InitLB(strategyType string) *LB {
+	log.Println("Initializing backends")
+
 	backends := []*common.Backend{
 		{Host: "localhost", Port: 8081, IsHealthy: true},
 		{Host: "localhost", Port: 8082, IsHealthy: true},
@@ -23,19 +27,47 @@ func InitLB() *LB {
 		{Host: "localhost", Port: 8084, IsHealthy: true},
 	}
 
+	var strategy STRATEGY.BalancingStrategy
+
+	log.Printf("Selected strategy: %s", strategyType)
+
+	if strategyType == "consistent" {
+		log.Println("Using Consistent Hashing Strategy")
+		consistentStrategy := STRATEGY.NewConsistentHashingStrategy(backends)
+		consistentStrategy.Init(backends)
+		go consistentStrategy.StartHealthCheck()
+		strategy = consistentStrategy
+		log.Println("Consistent Hashing Strategy initialized successfully")
+	} else if strategyType == "round-robin" {
+		log.Println("Using Round-Robin Strategy")
+		strategy = STRATEGY.NewRRBalancingStrategy(backends)
+		log.Println("Round-Robin Strategy initialized successfully")
+	} else {
+		log.Fatalf("Unknown strategy type: %s", strategyType)
+	}
+
 	lb := &LB{
 		backends: backends,
-		strategy: STRATEGY.NewRRBalancingStrategy(backends), // Using Round-Robin by default
+		strategy: strategy,
 	}
+	log.Println("Load Balancer initialized successfully")
 	return lb
 }
 
 func (lb *LB) proxyHTTP(w http.ResponseWriter, req *http.Request) {
-	// Select a backend using the configured balancing strategy
-	backend := lb.strategy.GetNextBackend(common.IncomingReq{})
+	if req.RequestURI == "/health" {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+		return
+	}
+
+	incomingReq := common.IncomingReq{
+		ReqId: req.RequestURI,
+	}
+
+	backend := lb.strategy.GetNextBackend(incomingReq)
 	log.Printf("Request -> Routing to backend: %s", backend.String())
 
-	// Try to connect to the selected backend
 	backendURL := fmt.Sprintf("http://%s:%d%s", backend.Host, backend.Port, req.RequestURI)
 	resp, err := http.Get(backendURL)
 	if err != nil {
@@ -45,15 +77,27 @@ func (lb *LB) proxyHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Copy the response from the backend to the client
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
 
 func main() {
-	lb := InitLB()
+	// Define a command-line flag for the strategy
+	strategyFlag := flag.String("strategy", "round-robin", "Load balancing strategy (consistent or round-robin)")
+	flag.Parse()
 
-	// Start HTTP server to handle incoming HTTP requests
+	// Get the strategy from the environment variable if the flag is not set
+	strategyType := *strategyFlag
+	if strategyType == "" {
+		strategyType = os.Getenv("LOAD_BALANCER_STRATEGY")
+	}
+
+	// Initialize the load balancer with the selected strategy
+	log.Println("Initializing Load Balancer")
+	lb := InitLB(strategyType)
+	log.Println("Load Balancer initialized successfully")
+
+	// Start the HTTP server
 	http.HandleFunc("/", lb.proxyHTTP)
 	log.Println("Load Balancer is listening on HTTP port 9090")
 	err := http.ListenAndServe(":9090", nil)

@@ -9,7 +9,6 @@ import (
 )
 
 func main() {
-	// Define the port as a command-line argument
 	portPtr := flag.Int("port", 8080, "Port for the server to listen on")
 	flag.Parse()
 
