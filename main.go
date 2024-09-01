@@ -33,7 +33,7 @@ func InitLB(strategyType string) *LB {
 
 	if strategyType == "consistent" {
 		log.Println("Using Consistent Hashing Strategy")
-		consistentStrategy := STRATEGY.NewConsistentHashingStrategy(backends)
+		consistentStrategy := STRATEGY.NewConsistentHashingStrategy(backends, 100) // 100 vNodes per backend
 		consistentStrategy.Init(backends)
 		go consistentStrategy.StartHealthCheck()
 		strategy = consistentStrategy
