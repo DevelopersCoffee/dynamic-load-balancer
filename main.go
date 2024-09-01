@@ -66,13 +66,19 @@ func (lb *LB) proxyHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	backend := lb.strategy.GetNextBackend(incomingReq)
-	log.Printf("Request -> Routing to backend: %s", backend.String())
+	if backend == nil {
+		http.Error(w, "No healthy backends available", http.StatusServiceUnavailable)
+		log.Println("No healthy backends available to handle the request")
+		return
+	}
 
 	backendURL := fmt.Sprintf("http://%s:%d%s", backend.Host, backend.Port, req.RequestURI)
 	resp, err := http.Get(backendURL)
-	if err != nil {
-		http.Error(w, "Backend is currently unavailable", http.StatusServiceUnavailable)
+	if err != nil || resp.StatusCode != http.StatusOK {
 		log.Printf("Error connecting to backend %s: %s", backend.String(), err.Error())
+		backend.IsHealthy = false            // Mark the backend as unhealthy
+		lb.strategy.RegisterBackend(backend) // Re-register backend for possible future use
+		http.Error(w, "Backend is currently unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	defer resp.Body.Close()

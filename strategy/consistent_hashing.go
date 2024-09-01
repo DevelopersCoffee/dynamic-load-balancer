@@ -75,25 +75,26 @@ func (s *ConsistentHashingStrategy) GetNextBackend(req common.IncomingReq) *comm
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	reqHash := hash(req.ReqId)
+	if len(s.HashRing) == 0 {
+		log.Println("No healthy backends available")
+		return nil
+	}
 
+	reqHash := hash(req.ReqId)
 	index := sort.Search(len(s.HashRing), func(i int) bool {
 		return s.HashRing[i] >= reqHash
 	})
 
-	if index == len(s.HashRing) {
-		index = 0
+	for i := 0; i < len(s.HashRing); i++ {
+		currentIndex := (index + i) % len(s.HashRing)
+		backend := s.BackendMap[s.HashRing[currentIndex]]
+		if backend.IsHealthy {
+			return backend
+		}
 	}
 
-	backend := s.BackendMap[s.HashRing[index]]
-
-	if !backend.IsHealthy {
-		log.Printf("Backend %s is down, rehashing...", backend.String())
-		s.removeBackend(backend)
-		return s.GetNextBackend(req)
-	}
-
-	return backend
+	log.Println("No healthy backends found after checking all backends")
+	return nil
 }
 
 func hash(s string) int {
@@ -107,18 +108,28 @@ func hash(s string) int {
 }
 
 func (s *ConsistentHashingStrategy) StartHealthCheck() {
-	for {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
 		for _, backend := range s.BackendMap {
-			resp, err := http.Get(fmt.Sprintf("http://%s:%d/health", backend.Host, backend.Port))
-			if err != nil || resp.StatusCode != 200 {
-				backend.IsHealthy = false
-				log.Printf("Backend %s is marked as down", backend.String())
-				s.removeBackend(backend)
-			} else {
-				backend.IsHealthy = true
-			}
+			go func(backend *common.Backend) {
+				resp, err := http.Get(fmt.Sprintf("http://%s:%d/health", backend.Host, backend.Port))
+				if err != nil || resp.StatusCode != 200 {
+					if backend.IsHealthy {
+						log.Printf("Backend %s is marked as down", backend.String())
+						backend.IsHealthy = false
+						s.removeBackend(backend)
+					}
+				} else {
+					if !backend.IsHealthy {
+						log.Printf("Backend %s is back online", backend.String())
+						backend.IsHealthy = true
+						s.addBackend(backend)
+					}
+				}
+			}(backend)
 		}
-		time.Sleep(10 * time.Second)
 	}
 }
 
